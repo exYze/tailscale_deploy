@@ -1,0 +1,18 @@
+{
+  "authKey": "tskey-client-REPLACE_ME",
+  "tags": ["tag:endpoint"],
+  "oauthPreauthorized": true,
+  "hostnamePrefix": "",
+  "loginServer": "",
+  "version": "latest",
+  "track": "stable",
+  "mirrorURL": "",
+  "acceptRoutes": false,
+  "forceReauth": false,
+  "connectTimeoutSeconds": 180,
+  "extraUpArgs": [],
+  "windowsMSIProperties": {
+    "TS_UNATTENDEDMODE": "always",
+    "TS_INSTALLUPDATES": "always"
+  }
+}

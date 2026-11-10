@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Push this profile from your MDM (Jamf, Intune, Kandji/Iru, Mosyle, SimpleMDM, ...)
+  BEFORE running TailscaleDeploy-macOS. It pre-approves, for the Standalone Tailscale app:
+    1. its system extension      (no "System software was blocked" prompt)
+    2. its VPN configuration     (no "would like to add VPN configurations" prompt)
+    3. its login item            (no "Background Items Added" prompt)
+  macOS only accepts a System-scoped profile from an MDM server. Users cannot install it themselves.
+  Source: https://tailscale.com/docs/integrations/mdm/mac
+-->
+<plist version="1.0">
+<dict>
+	<key>PayloadDisplayName</key>
+	<string>Tailscale (pre-approval)</string>
+	<key>PayloadDescription</key>
+	<string>Pre-approves the Tailscale system extension, VPN configuration and login item.</string>
+	<key>PayloadIdentifier</key>
+	<string>com.tailscale-deploy.profile.6CAA11F0-D4E3-4382-A6DB-B31E832F0EBE</string>
+	<key>PayloadUUID</key>
+	<string>6CAA11F0-D4E3-4382-A6DB-B31E832F0EBE</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadScope</key>
+	<string>System</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadDisplayName</key>
+			<string>Allow Tailscale system extension</string>
+			<key>PayloadType</key>
+			<string>com.apple.system-extension-policy</string>
+			<key>PayloadIdentifier</key>
+			<string>com.tailscale-deploy.sysext.EF5804CC-110A-41BC-99E9-0BED355830DC</string>
+			<key>PayloadUUID</key>
+			<string>EF5804CC-110A-41BC-99E9-0BED355830DC</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>AllowedTeamIdentifiers</key>
+			<array>
+				<string>W5364U7YZB</string>
+			</array>
+		</dict>
+		<dict>
+			<key>PayloadDisplayName</key>
+			<string>Tailscale VPN configuration</string>
+			<key>PayloadType</key>
+			<string>com.apple.vpn.managed</string>
+			<key>PayloadIdentifier</key>
+			<string>com.tailscale-deploy.vpn.B2B72C54-5F81-49E4-B86B-5D98592B2CB8</string>
+			<key>PayloadUUID</key>
+			<string>B2B72C54-5F81-49E4-B86B-5D98592B2CB8</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>UserDefinedName</key>
+			<string>Tailscale</string>
+			<key>VPNType</key>
+			<string>VPN</string>
+			<key>VPNSubType</key>
+			<string>io.tailscale.ipn.macsys</string>
+			<key>VPN</key>
+			<dict>
+				<key>RemoteAddress</key>
+				<string>Tailscale Mesh</string>
+				<key>AuthenticationMethod</key>
+				<string>Password</string>
+				<key>ProviderBundleIdentifier</key>
+				<string>io.tailscale.ipn.macsys.network-extension</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>PayloadDisplayName</key>
+			<string>Allow Tailscale login item</string>
+			<key>PayloadType</key>
+			<string>com.apple.servicemanagement</string>
+			<key>PayloadIdentifier</key>
+			<string>com.tailscale-deploy.loginitem.E5F847C3-C61D-48A0-A071-A0EEC95E5099</string>
+			<key>PayloadUUID</key>
+			<string>E5F847C3-C61D-48A0-A071-A0EEC95E5099</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>Rules</key>
+			<array>
+				<dict>
+					<key>RuleType</key>
+					<string>TeamIdentifier</string>
+					<key>RuleValue</key>
+					<string>W5364U7YZB</string>
+					<key>Comment</key>
+					<string>Tailscale Inc.</string>
+				</dict>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

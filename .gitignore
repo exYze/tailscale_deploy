@@ -1,0 +1,6 @@
+# Build output: these binaries contain your Tailscale key
+dist/
+# Private Go toolchain downloaded by build.ps1
+.tools/
+# Your real settings (may contain your key)
+deploy-config.json

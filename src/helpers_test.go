@@ -19,9 +19,9 @@ func TestAppleScriptString(t *testing.T) {
 
 func TestOsascriptExitCode(t *testing.T) {
 	cases := map[string]int{
-		"0:153: execution error:  (3)":                  3,
+		"0:153: execution error:  (3)":                    3,
 		"0:200: execution error: User canceled. (-128)\n": -128,
-		"something unexpected":                          exitFailed,
+		"something unexpected":                            exitFailed,
 	}
 	for in, want := range cases {
 		if got := osascriptExitCode(in); got != want {
@@ -92,6 +92,47 @@ func TestHasFlag(t *testing.T) {
 	args := []string{"--silent", "-tags=tag:a"}
 	if !hasFlag(args, "silent") || !hasFlag(args, "tags") || hasFlag(args, "interactive") {
 		t.Fatal("hasFlag mismatch")
+	}
+}
+
+func TestSDDLMatches(t *testing.T) {
+	want := "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
+	ok := []string{
+		want,
+		"O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", // auto-inherit flags added by Windows
+	}
+	bad := []string{
+		"O:S-1-5-21-1-2-3-1001D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", // owned by a user
+		"O:BAD:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)",                 // not protected: inherits from ProgramData
+		"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;0x116;;;BU)", // users may create files
+		"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",                                        // different entries
+		"O:BAD:NO_ACCESS_CONTROL",
+		"O:BA",
+		"",
+	}
+	for _, s := range ok {
+		if !sddlMatches(s, want) {
+			t.Errorf("expected match: %s", s)
+		}
+	}
+	for _, s := range bad {
+		if sddlMatches(s, want) {
+			t.Errorf("expected no match: %s", s)
+		}
+	}
+}
+
+func TestKeyFileToStdin(t *testing.T) {
+	in := []string{"up", "--auth-key=file:/var/folders/x/tsdeploy-1.key", "--reset"}
+	got, path := keyFileToStdin(in)
+	if path != "/var/folders/x/tsdeploy-1.key" || strings.Join(got, " ") != "up --auth-key=file:/dev/stdin --reset" {
+		t.Fatalf("got %q %q", got, path)
+	}
+	if in[1] != "--auth-key=file:/var/folders/x/tsdeploy-1.key" {
+		t.Fatal("input slice was modified")
+	}
+	if got, path := keyFileToStdin([]string{"status", "--json"}); path != "" || strings.Join(got, " ") != "status --json" {
+		t.Fatalf("got %q %q", got, path)
 	}
 }
 

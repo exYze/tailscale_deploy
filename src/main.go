@@ -118,10 +118,22 @@ func run() int {
 		return relaunchElevated(os.Args[1:])
 	}
 
+	var workDirNote string
 	if isElevated() {
-		initLog(logFilePath())
+		// On Windows the log lives in the working folder, which must be
+		// secured before anything is written to it.
+		note, err := prepareWorkDir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "warning: not writing a log file: "+err.Error())
+		} else {
+			initLog(logFilePath())
+		}
+		workDirNote = note
 	}
 	logf("=== Tailscale Deploy %s | %s | %s ===", buildVersion, osDesc, time.Now().Format(time.RFC3339))
+	if workDirNote != "" {
+		logf("Note: %s", workDirNote)
+	}
 	logf("Config: %s", cfg.summary())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

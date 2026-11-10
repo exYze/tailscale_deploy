@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,7 +25,11 @@ var (
 	modShell32  = syscall.NewLazyDLL("shell32.dll")
 	modUser32   = syscall.NewLazyDLL("user32.dll")
 	modNtdll    = syscall.NewLazyDLL("ntdll.dll")
+	modAdvapi32 = syscall.NewLazyDLL("advapi32.dll")
 
+	procConvertStringSDToSD   = modAdvapi32.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+	procConvertSDToStringSD   = modAdvapi32.NewProc("ConvertSecurityDescriptorToStringSecurityDescriptorW")
+	procGetSecurityInfo       = modAdvapi32.NewProc("GetSecurityInfo")
 	procIsWow64Process2       = modKernel32.NewProc("IsWow64Process2")
 	procGetConsoleProcessList = modKernel32.NewProc("GetConsoleProcessList")
 	procProcessIdToSessionId  = modKernel32.NewProc("ProcessIdToSessionId")
@@ -76,6 +81,136 @@ func workDir() string {
 }
 
 func logFilePath() string { return filepath.Join(programData(), "TailscaleDeploy", "deploy.log") }
+
+// workDirSDDL is the security descriptor of the elevated working folder: owner
+// Administrators, and a protected DACL (nothing inherited from C:\ProgramData,
+// which lets every user create files and folders) granting SYSTEM and
+// Administrators full control and Users read-only access, so logs stay readable.
+const workDirSDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
+
+// prepareWorkDir creates the working folder. When elevated, the folder holds
+// the MSI that msiexec runs as SYSTEM and the logs SYSTEM writes, so a standard
+// user must not be able to write to it: otherwise they could pre-create it (or
+// files in it), swap the verified MSI before msiexec runs it, or plant links
+// that redirect the logs onto other files. It returns a note when an existing,
+// unprotected folder had to be moved aside.
+func prepareWorkDir() (string, error) {
+	dir := workDir()
+	if !isElevated() {
+		return "", os.MkdirAll(dir, 0o755)
+	}
+	return secureDir(dir, workDirSDDL)
+}
+
+// secureDir makes dir a plain folder whose owner and DACL are exactly sddl.
+// The folder is created atomically with that security descriptor. Anything
+// already at that path that does not match exactly (a folder from an older
+// version or created by another user, a junction, a file) is moved aside
+// untouched and never used. It returns a note if something was moved aside.
+func secureDir(dir, sddl string) (string, error) {
+	sd, err := sddlToSD(sddl)
+	if err != nil {
+		return "", fmt.Errorf("building the security descriptor: %w", err)
+	}
+	defer syscall.LocalFree(syscall.Handle(sd))
+	want, err := sdToSDDL(sd)
+	if err != nil {
+		return "", err
+	}
+	path, err := syscall.UTF16PtrFromString(dir)
+	if err != nil {
+		return "", err
+	}
+	var notes []string
+	for attempt := 0; attempt < 3; attempt++ {
+		got, err := dirSDDL(dir)
+		if err == nil && sddlMatches(got, want) {
+			return strings.Join(notes, "; "), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			// Renaming needs only "delete child" rights on the parent folder,
+			// which Administrators and SYSTEM have, whatever the folder's own ACL.
+			aside := dir + ".unprotected-" + time.Now().Format("20060102-150405.000000")
+			if rerr := os.Rename(dir, aside); rerr != nil {
+				return "", fmt.Errorf("%s exists but other users can change it, and it could not be moved aside: %v", dir, rerr)
+			}
+			notes = append(notes, fmt.Sprintf("moved the unprotected folder %s aside to %s", dir, aside))
+		}
+		sa := syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), SecurityDescriptor: sd}
+		if err := syscall.CreateDirectory(path, &sa); err != nil && !errors.Is(err, syscall.ERROR_ALREADY_EXISTS) {
+			return "", fmt.Errorf("creating %s: %w", dir, err)
+		}
+		// Loop to verify what is there now (someone may have raced us).
+	}
+	return "", fmt.Errorf("%s could not be secured", dir)
+}
+
+// dirSDDL returns the owner+DACL SDDL of dir. It opens dir itself (not the
+// target of a junction or symlink) and fails unless it is a plain folder.
+func dirSDDL(dir string) (string, error) {
+	const readControl, fileReadAttributes = 0x00020000, 0x80
+	p, err := syscall.UTF16PtrFromString(dir)
+	if err != nil {
+		return "", err
+	}
+	h, err := syscall.CreateFile(p, readControl|fileReadAttributes,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE, nil, syscall.OPEN_EXISTING,
+		syscall.FILE_FLAG_BACKUP_SEMANTICS|syscall.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return "", err
+	}
+	defer syscall.CloseHandle(h)
+	var fi syscall.ByHandleFileInformation
+	if err := syscall.GetFileInformationByHandle(h, &fi); err != nil {
+		return "", err
+	}
+	if fi.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0 || fi.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return "", errors.New("not a plain folder")
+	}
+	const seFileObject = 1
+	var sd uintptr
+	if r, _, _ := procGetSecurityInfo.Call(uintptr(h), seFileObject, ownerSecurityInformation|daclSecurityInformation,
+		0, 0, 0, 0, uintptr(unsafe.Pointer(&sd))); r != 0 {
+		return "", syscall.Errno(r)
+	}
+	defer syscall.LocalFree(syscall.Handle(sd))
+	return sdToSDDL(sd)
+}
+
+const (
+	sddlRevision1            = 1
+	ownerSecurityInformation = 0x1
+	daclSecurityInformation  = 0x4
+)
+
+// sddlToSD converts an SDDL string to a self-relative security descriptor,
+// which the caller frees with LocalFree.
+func sddlToSD(s string) (uintptr, error) {
+	p, err := syscall.UTF16PtrFromString(s)
+	if err != nil {
+		return 0, err
+	}
+	var sd uintptr
+	if r, _, e := procConvertStringSDToSD.Call(uintptr(unsafe.Pointer(p)), sddlRevision1, uintptr(unsafe.Pointer(&sd)), 0); r == 0 {
+		return 0, e
+	}
+	return sd, nil
+}
+
+// sdToSDDL returns the owner and DACL of a security descriptor as SDDL.
+func sdToSDDL(sd uintptr) (string, error) {
+	var str *uint16
+	if r, _, e := procConvertSDToStringSD.Call(sd, sddlRevision1, ownerSecurityInformation|daclSecurityInformation,
+		uintptr(unsafe.Pointer(&str)), 0); r == 0 {
+		return "", e
+	}
+	defer syscall.LocalFree(syscall.Handle(uintptr(unsafe.Pointer(str))))
+	n := 0
+	for *(*uint16)(unsafe.Add(unsafe.Pointer(str), 2*n)) != 0 {
+		n++
+	}
+	return syscall.UTF16ToString(unsafe.Slice(str, n)), nil
+}
 
 type osVersionInfoEx struct {
 	OSVersionInfoSize uint32
@@ -250,7 +385,7 @@ func installTailscale(ctx context.Context, cfg *Config, dryRun bool) error {
 	}
 	name := fmt.Sprintf("tailscale-setup-%s-%s.msi", ver, arch)
 	dir := workDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if _, err := prepareWorkDir(); err != nil {
 		return err
 	}
 	msi := filepath.Join(dir, name)

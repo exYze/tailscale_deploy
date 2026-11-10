@@ -18,7 +18,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +84,11 @@ func asConsoleUser(name, uid string, argv ...string) (string, []string) {
 
 // runCLI runs the Tailscale CLI as root and, if that fails, as the console
 // user (the GUI app's local API is owned by that user's session).
+//
+// The temporary key file stays readable by root only: the console user may be
+// a standard user, who must not be able to copy the key (an OAuth client
+// secret never expires). In the console user's session the CLI gets the key
+// over stdin instead.
 func runCLI(ctx context.Context, timeout time.Duration, quiet bool, cli string, args ...string) (string, error) {
 	out, err := runCmd(ctx, timeout, quiet, cli, args...)
 	if err == nil || !isElevated() {
@@ -94,15 +98,18 @@ func runCLI(ctx context.Context, timeout time.Duration, quiet bool, cli string, 
 	if !ok {
 		return out, err
 	}
-	for _, a := range args { // let the user read the temporary key file
-		if p, found := strings.CutPrefix(a, "--auth-key=file:"); found {
-			if n, e := strconv.Atoi(uid); e == nil {
-				os.Chown(p, n, -1)
-			}
+	userArgs, keyPath := keyFileToStdin(args)
+	var stdin io.Reader
+	if keyPath != "" {
+		key, rerr := os.ReadFile(keyPath)
+		if rerr != nil {
+			return out, err
 		}
+		stdin = bytes.NewReader(key)
 	}
-	bin, full := asConsoleUser(name, uid, append([]string{cli}, args...)...)
-	if out2, err2 := runCmd(ctx, timeout, quiet, bin, full...); err2 == nil {
+	bin, full := asConsoleUser(name, uid, append([]string{cli}, userArgs...)...)
+	out2, err2 := runCmdWith(ctx, timeout, quiet, func(c *exec.Cmd) { c.Stdin = stdin }, bin, full...)
+	if err2 == nil {
 		return out2, nil
 	}
 	return out, err
@@ -115,7 +122,7 @@ func installTailscale(ctx context.Context, cfg *Config, dryRun bool) error {
 	}
 	name := fmt.Sprintf("Tailscale-%s-macos.pkg", ver)
 	dir := workDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if _, err := prepareWorkDir(); err != nil {
 		return err
 	}
 	pkg := filepath.Join(dir, name)

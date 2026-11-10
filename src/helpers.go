@@ -138,6 +138,52 @@ func extractJSON(s string) string {
 	return s[i : j+1]
 }
 
+// splitSDDL splits an owner+DACL SDDL string ("O:<owner>D:<flags><aces>"),
+// as Windows returns it for OWNER|DACL_SECURITY_INFORMATION, into its parts.
+func splitSDDL(s string) (owner, daclFlags, aces string, ok bool) {
+	rest, ok := strings.CutPrefix(s, "O:")
+	if !ok {
+		return "", "", "", false
+	}
+	owner, dacl, ok := strings.Cut(rest, "D:")
+	if !ok || owner == "" {
+		return "", "", "", false
+	}
+	i := strings.IndexByte(dacl, '(')
+	if i < 0 {
+		return owner, dacl, "", true
+	}
+	return owner, dacl[:i], dacl[i:], true
+}
+
+// sddlMatches reports whether actual (read back from a folder) has exactly the
+// owner and access entries of want, and a protected DACL (nothing inherited).
+// Only the auto-inherit flags "AI"/"AR", which Windows may add, are ignored.
+func sddlMatches(actual, want string) bool {
+	ao, af, aa, ok1 := splitSDDL(actual)
+	wo, _, wa, ok2 := splitSDDL(want)
+	if !ok1 || !ok2 || ao != wo || aa != wa || aa == "" {
+		return false
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(af, "AI", ""), "AR", "") == "P"
+}
+
+// keyFileToStdin rewrites "--auth-key=file:<path>" so that the Tailscale CLI
+// reads the key from stdin instead of a file. It returns the new arguments and
+// the original key file path ("" if there was none).
+func keyFileToStdin(args []string) ([]string, string) {
+	out := make([]string, len(args))
+	path := ""
+	for i, a := range args {
+		if p, ok := strings.CutPrefix(a, "--auth-key=file:"); ok {
+			path = p
+			a = "--auth-key=file:/dev/stdin"
+		}
+		out[i] = a
+	}
+	return out, path
+}
+
 // hasFlag reports whether args contains -name / --name / -name=x / --name=x.
 func hasFlag(args []string, name string) bool {
 	for _, a := range args {

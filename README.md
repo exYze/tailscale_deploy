@@ -133,11 +133,12 @@ Unsupported machines exit with code **2** and a clear message, so your RMM can r
   * Distribute the binaries only through your RMM/MDM or an internal share. Don't email them or post them publicly.
   * **When rollout is done, revoke the OAuth client** (Settings → Trust credentials). Devices that already joined stay connected; leaked copies stop working.
   * Or use **Keyless mode** (below) so the key lives only in your RMM's secret store.
-* The key is never put on a command line and never written to logs. It goes to `tailscale up` through a temporary file that is deleted right away.
+* The key is never put on a command line and never written to logs. It goes to `tailscale up` through a temporary file that only root/SYSTEM can read and that is deleted right away. On macOS, when the Tailscale CLI has to run in the logged-in user's session, the key is passed over stdin instead, so that user (who may be a standard user) never gets a readable copy.
+* The Windows working folder `C:\ProgramData\TailscaleDeploy` (installer and logs) can be changed only by SYSTEM and Administrators; Users can read it. If the folder already exists with other permissions (created by v0.1.0, or pre-created by another user), it is moved aside to `TailscaleDeploy.unprotected-<date>` and recreated, so nobody can swap the verified installer before it runs.
 * **Code-sign the binaries** for a smooth one-click experience. RMM/MDM pushes don't need signing.
   * Windows: `signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /a TailscaleDeploy-Windows.exe`. Unsigned downloads show a SmartScreen warning ("More info → Run anyway").
   * macOS: `codesign --force --options runtime --timestamp --sign "Developer ID Application: <Your Org>" TailscaleDeploy-macOS`, then `ditto -c -k TailscaleDeploy-macOS t.zip && xcrun notarytool submit t.zip --wait ...`. Unsigned binaries downloaded in a browser are blocked by Gatekeeper (right-click → Open to bypass).
-* **EDR/antivirus:** a new binary that elevates, downloads and installs a VPN can be flagged. Allow-list the hashes in `SHA256SUMS.txt` before rollout.
+* **EDR/antivirus:** a new binary that elevates, downloads and installs a VPN can be flagged. Allow-list it before rollout; see **Allow-listing in Microsoft Defender and other EDRs** below.
 
 ### Keyless mode
 Build with `.\build.ps1 -NoEmbeddedKey`, then supply the key at run time. The environment variable is preferred, because it keeps the key off the command line:
@@ -145,6 +146,74 @@ Build with `.\build.ps1 -NoEmbeddedKey`, then supply the key at run time. The en
 set TS_DEPLOY_AUTHKEY=tskey-client-...      (from your RMM's secret variable)
 TailscaleDeploy-Windows.exe --silent --tags tag:endpoint
 ```
+
+## Allow-listing in Microsoft Defender and other EDRs
+
+A new, unsigned binary that asks for admin rights, downloads an installer and sets up a VPN looks a lot like malware to an EDR, especially before the file has any reputation. Allow it **before** the rollout, then test it on a few pilot devices.
+
+**What the EDR will see** (useful for your SOC or for tuning behavioral rules):
+
+| Step | Windows | macOS | Linux |
+|---|---|---|---|
+| Elevates | UAC prompt (or already SYSTEM) | admin password dialog via `osascript` | `sudo` / `pkexec` |
+| Downloads from | `https://pkgs.tailscale.com` | `https://pkgs.tailscale.com` | `https://tailscale.com/install.sh`, `https://pkgs.tailscale.com` |
+| Writes to | `C:\ProgramData\TailscaleDeploy\` | `/Library/Application Support/TailscaleDeploy/` | `/var/cache/tailscale-deploy/` |
+| Child processes | `powershell.exe` (signature check only), `msiexec.exe /i ... /qn`, `sc.exe start Tailscale`, `tailscale.exe up` | `pkgutil`, `installer`, `launchctl asuser`, `open`, Tailscale CLI | `sh install.sh` (your package manager), `systemctl`, `tailscale up` |
+
+**Which hashes to allow.** Allow the SHA-256 of the exact files you deploy:
+* **Release downloads:** use the hashes in that release's `SHA256SUMS.txt`.
+* **Your own builds:** use the `dist\SHA256SUMS.txt` from that build. A build with your key inside has **different hashes** from the release binaries, and every rebuild changes them again.
+
+So add new hashes each time you build or upgrade. Code-signing the binaries avoids that: you allow the certificate once (see below).
+
+### Microsoft Defender for Endpoint (recommended: file hash indicator)
+
+1. **Turn on the feature (once):** [Microsoft Defender portal](https://security.microsoft.com) → **Settings** → **Endpoints** → **General** → **Advanced features** → turn on **Allow or block file** → **Save preferences**. This requires Defender Antivirus in active mode with cloud-delivered protection.
+2. **Add the indicator:** **Settings** → **Endpoints** → **Indicators** (under *Rules*) → **File hashes** → **Add item**. Paste one SHA-256, set **Action: Allow**, choose the device groups and an expiry, then **Save**. Repeat for each file you deploy.
+   * To add many hashes at once, use **Import** with a CSV, or the [Indicator API](https://learn.microsoft.com/defender-endpoint/api/ti-indicator).
+   * File hash indicators also work for macOS and Linux devices onboarded to Defender for Endpoint.
+3. An **Allow** indicator also overrides attack surface reduction (ASR) rules. That matters for **"Block executable files from running unless they meet a prevalence, age, or trusted list criterion"** (`01443614-cd74-433a-b99e-2ecdc07bfc25`). This rule blocks brand-new binaries like these until they have built a reputation.
+
+If you sign the binaries, you can instead add one **Certificate** indicator (Allow) with your signing certificate (`.cer` or `.pem`). It then covers every future build.
+
+**SmartScreen is separate.** An Allow indicator does **not** override a SmartScreen block. SmartScreen only checks files downloaded with a browser (they carry the "Mark of the Web"). Files pushed by Intune, GPO or an RMM agent are not checked, so they are not affected. For a file someone downloaded by hand, either:
+* run `Unblock-File .\TailscaleDeploy-Windows.exe` first, or
+* click **More info → Run anyway**, or
+* sign the binary.
+
+### Microsoft Defender Antivirus without Defender for Endpoint (exclusions)
+
+Exclusions are broader than an indicator (they skip scanning entirely), so keep them narrow and remove them after the rollout. They also cover antivirus scanning **only**: Defender for Endpoint's EDR can still raise alerts on an excluded file, and only an indicator covers both.
+
+Add **path** exclusions for the full path of the exe as you deploy it, plus the working folder `C:\ProgramData\TailscaleDeploy\`. Don't use a *process* exclusion here: it only skips the files that process opens, not the process itself.
+* **Intune:** **Endpoint security** → **Antivirus** → **Create policy** → *Windows* → **Microsoft Defender Antivirus exclusions** → **Excluded paths**.
+* **Group Policy:** **Computer Configuration → Administrative Templates → Windows Components → Microsoft Defender Antivirus → Exclusions → Path Exclusions**.
+* **Single machine** (elevated PowerShell):
+  ```powershell
+  Add-MpPreference -ExclusionPath 'C:\Deploy\TailscaleDeploy-Windows.exe', 'C:\ProgramData\TailscaleDeploy'
+  ```
+  If tamper protection protects your exclusions (with `DisableLocalAdminMerge`), local exclusions like this are ignored; use Intune or Configuration Manager instead.
+* **ASR rules:** if the prevalence rule above blocks the binary and you don't use indicators, add the exe's path in your Intune **Attack surface reduction** policy. Use the rule's **ASR only per rule exclusions** to exempt it from that rule only, or **Attack surface reduction only exclusions** to exempt it from all rules.
+
+If Defender reports the file as a named threat, also submit it as a false positive at [aka.ms/wdsi](https://aka.ms/wdsi).
+
+### Other EDRs (CrowdStrike, SentinelOne, Sophos, ...)
+
+The same three options apply, in order of preference (menu names vary by console version):
+
+1. **Allow by SHA-256.** CrowdStrike Falcon: *IOC management*, action **Allow**. SentinelOne: *Exclusions* → **Hash**. Sophos Central: *Global exclusions / Allowed applications*.
+2. **Allow by signing certificate** (if you sign the binaries).
+3. **Path/process exclusion** for the deployed exe and its working folder (table above), as a last resort.
+
+If a **behavioral** detection fires (for example, "unsigned process spawned PowerShell / msiexec"), a hash allow may not cover it. Create the exclusion from that detection instead, such as a CrowdStrike *IOA exclusion* or a SentinelOne exclusion in the matching interoperability mode.
+
+### Tailscale itself
+
+Tailscale's own files (`tailscale.exe`, `tailscaled.exe`, the macOS app) are signed by Tailscale Inc. and are rarely flagged. If your EDR does flag them, allow Tailscale's certificate. On Windows you can export it like this:
+```powershell
+(Get-AuthenticodeSignature 'C:\Program Files\Tailscale\tailscale.exe').SignerCertificate | Export-Certificate -FilePath tailscale.cer
+```
+Also make sure your web filter or proxy allows `*.tailscale.com`.
 
 ## Settings (`deploy-config.json`)
 

@@ -77,21 +77,14 @@ func tailscaleCLIPath() (string, bool) {
 
 // elevatedDir is the secured working folder in use for this run. It is set by
 // prepareWorkDir and differs from defaultElevatedDir only when that folder
-// could not be secured.
+// could not be secured. There is deliberately no workDir() on Windows: write
+// only to the folder prepareWorkDir returns.
 var elevatedDir string
 
 func defaultElevatedDir() string { return filepath.Join(programData(), "TailscaleDeploy") }
 
-func workDir() string {
-	if isElevated() {
-		if elevatedDir != "" {
-			return elevatedDir
-		}
-		return defaultElevatedDir()
-	}
-	return filepath.Join(os.TempDir(), "TailscaleDeploy")
-}
-
+// logFilePath is where the log is (or would be) written. Before prepareWorkDir
+// has secured a folder it is only shown in messages, never opened.
 func logFilePath() string {
 	if elevatedDir != "" {
 		return filepath.Join(elevatedDir, "deploy.log")
@@ -105,25 +98,27 @@ func logFilePath() string {
 // Administrators full control and Users read-only access, so logs stay readable.
 const workDirSDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
 
-// prepareWorkDir creates the working folder. When elevated, the folder holds
-// the MSI that msiexec runs as SYSTEM and the logs SYSTEM writes, so a standard
-// user must not be able to write to it: otherwise they could pre-create it (or
-// files in it), swap the verified MSI before msiexec runs it, or plant links
-// that redirect the logs onto other files. It returns a note when an existing,
+// prepareWorkDir creates the working folder and returns it; callers must write
+// only to the returned folder. When elevated, the folder holds the MSI that
+// msiexec runs as SYSTEM and the logs SYSTEM writes, so a standard user must
+// not be able to write to it: otherwise they could pre-create it (or files in
+// it), swap the verified MSI before msiexec runs it, or plant links that
+// redirect the logs onto other files. The note says when an existing,
 // unprotected folder had to be moved aside or a fallback folder is used.
-func prepareWorkDir() (string, error) {
-	if !isElevated() {
-		return "", os.MkdirAll(workDir(), 0o755)
+func prepareWorkDir() (dir, note string, err error) {
+	if !isElevated() { // unelevated --dry-run: the user's own temp folder
+		dir = filepath.Join(os.TempDir(), "TailscaleDeploy")
+		return dir, "", os.MkdirAll(dir, 0o755)
 	}
 	if elevatedDir != "" {
-		return "", nil // secured earlier in this run; non-admins cannot change it
+		return elevatedDir, "", nil // secured earlier in this run; non-admins cannot change it
 	}
-	dir, note, err := secureDirOrFallback(defaultElevatedDir(), workDirSDDL)
+	dir, note, err = secureDirOrFallback(defaultElevatedDir(), workDirSDDL)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	elevatedDir = dir
-	return note, nil
+	return dir, note, nil
 }
 
 // secureDirOrFallback secures dir with secureDir. If that fails, for example
@@ -457,8 +452,8 @@ func installTailscale(ctx context.Context, cfg *Config, dryRun bool) error {
 		return err
 	}
 	name := fmt.Sprintf("tailscale-setup-%s-%s.msi", ver, arch)
-	dir := workDir()
-	if _, err := prepareWorkDir(); err != nil {
+	dir, _, err := prepareWorkDir()
+	if err != nil {
 		return err
 	}
 	msi := filepath.Join(dir, name)
@@ -544,5 +539,5 @@ func onDaemonSlow(ctx context.Context) {
 
 func notReadyHint() string {
 	return "Tailscale was installed but its Windows service did not respond. Check the \"Tailscale\" service, and " +
-		filepath.Join(workDir(), "msiexec.log") + "."
+		filepath.Join(filepath.Dir(logFilePath()), "msiexec.log") + "."
 }

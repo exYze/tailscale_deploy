@@ -42,7 +42,7 @@ $ProgressPreference = 'SilentlyContinue'
 # Windows PowerShell 5.1 otherwise serialises some arrays as {"value":[...],"Count":n}
 Remove-TypeData System.Array -ErrorAction SilentlyContinue
 
-$Version   = '0.1.1'
+$Version   = '0.1.2'
 $Src       = Join-Path $Root 'src'
 $Embedded  = Join-Path $Src 'embedded_config.json'
 $Utf8NoBom = New-Object System.Text.UTF8Encoding $false

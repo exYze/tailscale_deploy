@@ -110,8 +110,8 @@ func installTailscale(ctx context.Context, cfg *Config, dryRun bool) error {
 }
 
 func runInstallScript(ctx context.Context, cfg *Config, dryRun bool) error {
-	dir := workDir()
-	if _, err := prepareWorkDir(); err != nil {
+	dir, _, err := prepareWorkDir()
+	if err != nil {
 		return err
 	}
 	b, err := fetchBytes(ctx, "https://tailscale.com/install.sh", 1<<20)
@@ -143,8 +143,8 @@ func installFromTarball(ctx context.Context, cfg *Config, dryRun bool) error {
 		return err
 	}
 	name := fmt.Sprintf("tailscale_%s_%s.tgz", ver, arch)
-	dir := workDir()
-	if _, err := prepareWorkDir(); err != nil {
+	dir, _, err := prepareWorkDir()
+	if err != nil {
 		return err
 	}
 	tgz := filepath.Join(dir, name)

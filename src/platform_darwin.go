@@ -121,8 +121,8 @@ func installTailscale(ctx context.Context, cfg *Config, dryRun bool) error {
 		return err
 	}
 	name := fmt.Sprintf("Tailscale-%s-macos.pkg", ver)
-	dir := workDir()
-	if _, err := prepareWorkDir(); err != nil {
+	dir, _, err := prepareWorkDir()
+	if err != nil {
 		return err
 	}
 	pkg := filepath.Join(dir, name)

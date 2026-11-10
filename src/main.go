@@ -122,7 +122,7 @@ func run() int {
 	if isElevated() {
 		// On Windows the log lives in the working folder, which must be
 		// secured before anything is written to it.
-		note, err := prepareWorkDir()
+		_, note, err := prepareWorkDir()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "warning: not writing a log file: "+err.Error())
 		} else {

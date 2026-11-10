@@ -108,6 +108,32 @@ func TestSecureDirMovesAsideUnprotected(t *testing.T) {
 	}
 }
 
+// A user who holds a file inside a pre-created folder open stops it from being
+// moved aside; the deployment must then continue in a fresh, secured folder.
+func TestSecureDirFallsBackWhenBlocked(t *testing.T) {
+	sddl := testSDDL(t)
+	dir := filepath.Join(t.TempDir(), "TailscaleDeploy")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.Create(filepath.Join(dir, "held-open.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if _, err := secureDir(dir, sddl); err == nil {
+		t.Fatal("expected moving the folder aside to fail while a file in it is open")
+	}
+	got, note, err := secureDirOrFallback(dir, sddl)
+	if err != nil || !strings.HasPrefix(got, dir+"-") || !strings.Contains(note, "using "+got+" instead") {
+		t.Fatalf("got %q, note %q, err %v", got, note, err)
+	}
+	assertSecured(t, got, sddl)
+	if _, err := os.Stat(filepath.Join(dir, "held-open.txt")); err != nil {
+		t.Fatal("the blocked folder must be left alone")
+	}
+}
+
 func TestWorkDirSDDLIsValid(t *testing.T) {
 	sd, err := sddlToSD(workDirSDDL)
 	if err != nil {

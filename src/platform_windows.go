@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -73,14 +75,29 @@ func tailscaleCLIPath() (string, bool) {
 	return p, fileExists(p)
 }
 
+// elevatedDir is the secured working folder in use for this run. It is set by
+// prepareWorkDir and differs from defaultElevatedDir only when that folder
+// could not be secured.
+var elevatedDir string
+
+func defaultElevatedDir() string { return filepath.Join(programData(), "TailscaleDeploy") }
+
 func workDir() string {
 	if isElevated() {
-		return filepath.Join(programData(), "TailscaleDeploy")
+		if elevatedDir != "" {
+			return elevatedDir
+		}
+		return defaultElevatedDir()
 	}
 	return filepath.Join(os.TempDir(), "TailscaleDeploy")
 }
 
-func logFilePath() string { return filepath.Join(programData(), "TailscaleDeploy", "deploy.log") }
+func logFilePath() string {
+	if elevatedDir != "" {
+		return filepath.Join(elevatedDir, "deploy.log")
+	}
+	return filepath.Join(defaultElevatedDir(), "deploy.log")
+}
 
 // workDirSDDL is the security descriptor of the elevated working folder: owner
 // Administrators, and a protected DACL (nothing inherited from C:\ProgramData,
@@ -93,13 +110,74 @@ const workDirSDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;B
 // user must not be able to write to it: otherwise they could pre-create it (or
 // files in it), swap the verified MSI before msiexec runs it, or plant links
 // that redirect the logs onto other files. It returns a note when an existing,
-// unprotected folder had to be moved aside.
+// unprotected folder had to be moved aside or a fallback folder is used.
 func prepareWorkDir() (string, error) {
-	dir := workDir()
 	if !isElevated() {
-		return "", os.MkdirAll(dir, 0o755)
+		return "", os.MkdirAll(workDir(), 0o755)
 	}
-	return secureDir(dir, workDirSDDL)
+	if elevatedDir != "" {
+		return "", nil // secured earlier in this run; non-admins cannot change it
+	}
+	dir, note, err := secureDirOrFallback(defaultElevatedDir(), workDirSDDL)
+	if err != nil {
+		return "", err
+	}
+	elevatedDir = dir
+	return note, nil
+}
+
+// secureDirOrFallback secures dir with secureDir. If that fails, for example
+// because a user holds a file inside the folder open so it cannot be moved
+// aside, it uses a new folder named dir-<random> instead, created atomically
+// with the same security descriptor, so that one user cannot stop the
+// deployment. It returns the folder to use and a note about what happened.
+func secureDirOrFallback(dir, sddl string) (string, string, error) {
+	note, err := secureDir(dir, sddl)
+	if err == nil {
+		return dir, note, nil
+	}
+	alt, aerr := createUniqueSecureDir(dir+"-", sddl)
+	if aerr != nil {
+		return "", "", fmt.Errorf("%v (and no fallback folder could be created: %v)", err, aerr)
+	}
+	return alt, fmt.Sprintf("%v; using %s instead", err, alt), nil
+}
+
+// createUniqueSecureDir creates a new folder prefix<random hex> with the
+// security descriptor sddl. The folder is only used if this call created it,
+// so its contents and ACL are known.
+func createUniqueSecureDir(prefix, sddl string) (string, error) {
+	sd, err := sddlToSD(sddl)
+	if err != nil {
+		return "", err
+	}
+	defer syscall.LocalFree(syscall.Handle(sd))
+	for attempt := 0; attempt < 10; attempt++ {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", err
+		}
+		dir := prefix + hex.EncodeToString(b[:])
+		err := createDirWithSD(dir, sd)
+		if err == nil {
+			return dir, nil
+		}
+		if !errors.Is(err, syscall.ERROR_ALREADY_EXISTS) {
+			return "", err
+		}
+	}
+	return "", errors.New("could not create a uniquely named folder")
+}
+
+// createDirWithSD creates dir with the security descriptor sd. It fails with
+// ERROR_ALREADY_EXISTS (never reusing what is there) if the path exists.
+func createDirWithSD(dir string, sd uintptr) error {
+	p, err := syscall.UTF16PtrFromString(dir)
+	if err != nil {
+		return err
+	}
+	sa := syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), SecurityDescriptor: sd}
+	return syscall.CreateDirectory(p, &sa)
 }
 
 // secureDir makes dir a plain folder whose owner and DACL are exactly sddl.
@@ -114,10 +192,6 @@ func secureDir(dir, sddl string) (string, error) {
 	}
 	defer syscall.LocalFree(syscall.Handle(sd))
 	want, err := sdToSDDL(sd)
-	if err != nil {
-		return "", err
-	}
-	path, err := syscall.UTF16PtrFromString(dir)
 	if err != nil {
 		return "", err
 	}
@@ -136,8 +210,7 @@ func secureDir(dir, sddl string) (string, error) {
 			}
 			notes = append(notes, fmt.Sprintf("moved the unprotected folder %s aside to %s", dir, aside))
 		}
-		sa := syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), SecurityDescriptor: sd}
-		if err := syscall.CreateDirectory(path, &sa); err != nil && !errors.Is(err, syscall.ERROR_ALREADY_EXISTS) {
+		if err := createDirWithSD(dir, sd); err != nil && !errors.Is(err, syscall.ERROR_ALREADY_EXISTS) {
 			return "", fmt.Errorf("creating %s: %w", dir, err)
 		}
 		// Loop to verify what is there now (someone may have raced us).
